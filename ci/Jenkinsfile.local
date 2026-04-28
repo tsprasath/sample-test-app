@@ -17,9 +17,6 @@ pipeline {
         OCIR_NAMESPACE = 'bmzbbujw9kal'
         OCIR_REPO     = 'dev-repo-test'
         IMAGE_NAME    = "${OCIR_REGISTRY}/${OCIR_NAMESPACE}/${OCIR_REPO}/${SERVICE}"
-        GIT_SHA       = ''
-        GIT_BRANCH    = ''
-        IMAGE_TAG     = ''
         TEST_PORT    = '3099'
     }
 
