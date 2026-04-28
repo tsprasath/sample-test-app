@@ -1,5 +1,6 @@
 // setup-pipeline.groovy — Run via Jenkins CLI to create shared lib, pipeline job, and credentials
-// Usage: java -jar jenkins-cli.jar -s http://localhost:8081 -auth admin:admin123 groovy = < ci/setup-pipeline.groovy
+// Usage: java -jar jenkins-cli.jar -s http://localhost:$PORT -auth $USER:$PASS groovy = < ci/setup-pipeline.groovy
+// Credentials are passed via Java system properties (-D flags) from the setup script.
 
 import jenkins.model.*
 import org.jenkinsci.plugins.workflow.job.*
@@ -47,23 +48,41 @@ job.setDefinition(scmDef)
 job.save()
 println "[setup] Pipeline job '${jobName}' created (SCM: ci/Jenkinsfile.local)"
 
-// ── 3. Credentials (placeholders — replace with real values) ──
+// ── 3. Credentials (from system properties or env vars) ──
 def domain = Domain.global()
 def store = SystemCredentialsProvider.getInstance().getStore()
 
+// Read from system properties passed via -Dprop=value
+def ocirUser  = System.getProperty("ocir.user",  "PLACEHOLDER_UPDATE_ME")
+def ocirToken = System.getProperty("ocir.token", "PLACEHOLDER_UPDATE_ME")
+def teamsUrl  = System.getProperty("teams.webhook", "")
+
+// Remove existing creds if re-running
+["ocir-credentials", "teams-webhook-url"].each { credId ->
+    def existing = store.getCredentials(domain).find { it.id == credId }
+    if (existing) {
+        store.removeCredentials(domain, existing)
+        println "[setup] Removed existing credential '${credId}'"
+    }
+}
+
 def ocir = new UsernamePasswordCredentialsImpl(
     CredentialsScope.GLOBAL, "ocir-credentials", "OCI Container Registry",
-    "bmzbbujw9kal/oracleidentitycloudservice/user@example.com", "placeholder-token"
+    ocirUser, ocirToken
 )
 store.addCredentials(domain, ocir)
-println "[setup] Credential 'ocir-credentials' added (placeholder — update with real values)"
+println "[setup] Credential 'ocir-credentials' added"
 
-def teamsWebhook = new UsernamePasswordCredentialsImpl(
-    CredentialsScope.GLOBAL, "teams-webhook-url", "Teams Webhook",
-    "webhook", "https://placeholder.webhook.office.com"
-)
-store.addCredentials(domain, teamsWebhook)
-println "[setup] Credential 'teams-webhook-url' added (placeholder — update with real values)"
+if (teamsUrl) {
+    def teamsWebhook = new UsernamePasswordCredentialsImpl(
+        CredentialsScope.GLOBAL, "teams-webhook-url", "Teams Webhook",
+        "webhook", teamsUrl
+    )
+    store.addCredentials(domain, teamsWebhook)
+    println "[setup] Credential 'teams-webhook-url' added"
+} else {
+    println "[setup] Teams webhook URL not provided — skipping"
+}
 
 instance.save()
 println "[setup] ✅ ALL DONE — shared lib + job + credentials configured"

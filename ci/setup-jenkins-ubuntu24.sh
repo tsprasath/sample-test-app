@@ -28,9 +28,8 @@
 set -euo pipefail
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-JENKINS_PORT="${JENKINS_PORT:-8080}"
-JENKINS_ADMIN_USER="${JENKINS_ADMIN_USER:-admin}"
-JENKINS_ADMIN_PASS="${JENKINS_ADMIN_PASS:-admin123}"
+# All credentials can be set via environment variables OR will be prompted.
+# Example: JENKINS_ADMIN_PASS=mysecret sudo -E ./setup-jenkins-ubuntu24.sh
 JAVA_VERSION="21"
 NODE_VERSION="20"
 JENKINS_HOME="/var/lib/jenkins"
@@ -54,10 +53,79 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
 step() { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 
-[[ $EUID -eq 0 ]] || err "Run as root: sudo $0"
+[[ $EUID -eq 0 ]] || err "Run as root: sudo -E $0"
 [[ "$(lsb_release -rs 2>/dev/null || echo unknown)" == "24.04" ]] || warn "Tested on Ubuntu 24.04 — your mileage may vary"
 
 export DEBIAN_FRONTEND=noninteractive
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 0. INTERACTIVE CREDENTIAL PROMPTS (skip if env vars are set)
+# ═════════════════════════════════════════════════════════════════════════════
+# Helper: prompt for a value if env var is empty. Usage: ask VAR "prompt" "default"
+ask() {
+    local var="$1" prompt="$2" default="${3:-}"
+    if [[ -n "${!var:-}" ]]; then
+        log "${prompt}: ${!var} (from env)"
+        return
+    fi
+    if [[ -n "$default" ]]; then
+        read -rp "  ${prompt} [${default}]: " val
+        eval "$var=\"${val:-$default}\""
+    else
+        read -rp "  ${prompt}: " val
+        while [[ -z "$val" ]]; do
+            warn "This field is required"
+            read -rp "  ${prompt}: " val
+        done
+        eval "$var=\"$val\""
+    fi
+}
+
+# Helper: prompt for password (hidden input)
+ask_secret() {
+    local var="$1" prompt="$2" default="${3:-}"
+    if [[ -n "${!var:-}" ]]; then
+        log "${prompt}: ******* (from env)"
+        return
+    fi
+    if [[ -n "$default" ]]; then
+        read -srp "  ${prompt} [${default}]: " val
+        echo ""
+        eval "$var=\"${val:-$default}\""
+    else
+        read -srp "  ${prompt}: " val
+        echo ""
+        while [[ -z "$val" ]]; do
+            warn "This field is required"
+            read -srp "  ${prompt}: " val
+            echo ""
+        done
+        eval "$var=\"$val\""
+    fi
+}
+
+echo ""
+echo -e "${CYAN}━━━ Runtime Configuration ━━━${NC}"
+echo -e "  Set via env vars to skip prompts (e.g. ${YELLOW}JENKINS_ADMIN_PASS=xxx sudo -E $0${NC})"
+echo ""
+
+echo -e "  ${GREEN}── Jenkins ──${NC}"
+ask         JENKINS_PORT        "Jenkins port"                   "8080"
+ask         JENKINS_ADMIN_USER  "Jenkins admin username"         "admin"
+ask_secret  JENKINS_ADMIN_PASS  "Jenkins admin password"         "admin123"
+
+echo ""
+echo -e "  ${GREEN}── OCIR (OCI Container Registry) ──${NC}"
+ask         OCIR_USER           "OCIR username (namespace/user)" "bmzbbujw9kal/oracleidentitycloudservice/user@example.com"
+ask_secret  OCIR_TOKEN          "OCIR auth token"                ""
+
+echo ""
+echo -e "  ${GREEN}── Teams Webhook ──${NC}"
+ask         TEAMS_WEBHOOK_URL   "Teams webhook URL"              ""
+
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. SYSTEM UPDATES + BASE PACKAGES
