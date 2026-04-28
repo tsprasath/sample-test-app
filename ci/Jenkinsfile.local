@@ -13,9 +13,13 @@ pipeline {
         SERVICE      = 'auth-service'
         SERVICE_DIR  = 'services/auth-service'
         HELM_CHART   = "infra/helm-charts/${SERVICE}"
-        IMAGE_NAME   = "diksha-dev/${SERVICE}"
-        GIT_SHA      = ''
-        IMAGE_TAG    = ''
+        OCIR_REGISTRY = 'bom.ocir.io'
+        OCIR_NAMESPACE = 'bmzbbujw9kal'
+        OCIR_REPO     = 'dev-repo-test'
+        IMAGE_NAME    = "${OCIR_REGISTRY}/${OCIR_NAMESPACE}/${OCIR_REPO}/${SERVICE}"
+        GIT_SHA       = ''
+        GIT_BRANCH    = ''
+        IMAGE_TAG     = ''
         TEST_PORT    = '3099'
     }
 
@@ -36,12 +40,17 @@ pipeline {
                 checkout scm
                 script {
                     def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    def branch = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    // Sanitize branch name: replace / with _ for tag safety
+                    branch = branch.replaceAll('[^a-zA-Z0-9._-]', '_')
                     env.GIT_SHA = sha
-                    env.IMAGE_TAG = sha + '-' + env.BUILD_NUMBER
+                    env.GIT_BRANCH = branch
+                    // Tag format: branch_SHA_buildNumber  e.g. release-4.5.0_RC3_68b1eaa_23
+                    env.IMAGE_TAG = branch + '_' + sha + '_' + env.BUILD_NUMBER
                     echo "============================================="
                     echo "  Service:  ${SERVICE}"
                     echo "  Image:    ${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-                    echo "  Branch:   ${sh(script: 'git branch --show-current', returnStdout: true).trim()}"
+                    echo "  Branch:   ${env.GIT_BRANCH}"
                     echo "  Commit:   ${env.GIT_SHA}"
                     echo "============================================="
                 }
