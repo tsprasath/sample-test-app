@@ -1,0 +1,208 @@
+@Library('dev-shared-lib') _
+
+import org.dev.Constants
+
+pipeline {
+    agent {
+        kubernetes {
+            yamlFile 'ci/pod-templates/build-pod.yaml'
+            defaultContainer 'node'
+        }
+    }
+
+    environment {
+        OCIR_REPO    = "${Constants.OCIR_REPO}"
+        APP_NAME     = "${Constants.PROJECT_NAME}"
+        GITOPS_REPO  = "https://github.com/diksha/dev-gitops.git"
+    }
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.GIT_SHORT_SHA}-${env.BUILD_NUMBER}"
+                }
+            }
+        }
+
+        stage('Code Quality') {
+            parallel {
+                stage('Lint & Audit') {
+                    steps {
+                        container('node') {
+                            sh 'npm ci'
+                            script {
+                                env.CODE_QUALITY = codeQualityScan(
+                                    reportDir: 'reports/code-quality',
+                                    auditLevel: 'high'
+                                )
+                            }
+                        }
+                    }
+                }
+                stage('Helm Validation') {
+                    steps {
+                        container('helm') {
+                            script {
+                                helmLint(
+                                    chartPath: 'helm/app',
+                                    reportDir: 'reports/helm'
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                container('node') {
+                    sh 'npm test -- --coverage --ci --reporters=default --reporters=jest-junit'
+                    junit 'junit.xml'
+                    publishHTML(target: [
+                        reportDir: 'coverage/lcov-report',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report',
+                        allowMissing: true
+                    ])
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                container('kaniko') {
+                    script {
+                        env.BUILD_RESULT = dockerBuild(
+                            imageName: env.APP_NAME,
+                            registry: env.OCIR_REPO
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy Scan') {
+                    steps {
+                        container('trivy') {
+                            script {
+                                trivyScan(
+                                    image: "${env.OCIR_REPO}/${env.APP_NAME}:${env.GIT_SHORT_SHA}",
+                                    scanFilesystem: true,
+                                    scanIaC: true,
+                                    iacPaths: ['infra/terraform', 'helm'],
+                                    reportDir: 'reports/trivy',
+                                    failOnCritical: true,
+                                    failOnHigh: false
+                                )
+                            }
+                        }
+                    }
+                }
+                stage('Gitleaks Scan') {
+                    steps {
+                        container('gitleaks') {
+                            script {
+                                gitleaksScan(
+                                    reportDir: 'reports/gitleaks'
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push to OCIR') {
+            steps {
+                container('kaniko') {
+                    withCredentials([usernamePassword(
+                        credentialsId: Constants.OCIR_CREDENTIALS_ID,
+                        usernameVariable: 'OCIR_USER',
+                        passwordVariable: 'OCIR_PASS'
+                    )]) {
+                        sh """
+                            echo \$OCIR_PASS | docker login ${Constants.OCIR_URL} -u \$OCIR_USER --password-stdin
+                            docker push ${env.OCIR_REPO}/${env.APP_NAME} --all-tags
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Update GitOps') {
+            steps {
+                container('kubectl') {
+                    script {
+                        def targetEnv = (env.BRANCH_NAME == 'main') ? 'staging' : 'dev'
+                        echo "Updating GitOps for ${targetEnv} with tag ${env.GIT_SHORT_SHA}"
+                        dir('gitops') {
+                            git branch: 'main',
+                                credentialsId: Constants.GITHUB_TOKEN_CREDENTIAL,
+                                url: env.GITOPS_REPO
+                            sh """
+                                cd overlays/${targetEnv}
+                                sed -i 's|newTag:.*|newTag: ${env.GIT_SHORT_SHA}|' kustomization.yaml
+                                git add -A
+                                git commit -m "${targetEnv}: deploy ${env.APP_NAME}:${env.GIT_SHORT_SHA}"
+                                git push origin main
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Promote to Prod') {
+            when {
+                branch 'release/*'
+            }
+            steps {
+                script {
+                    promoteToProd(
+                        gitopsRepo: env.GITOPS_REPO,
+                        imageTag: env.GIT_SHORT_SHA,
+                        smokeTestUrl: "https://staging.example.com",
+                        timeoutMinutes: 30
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            script {
+                def status = currentBuild.result ?: 'SUCCESS'
+                try {
+                    withCredentials([string(credentialsId: Constants.SLACK_WEBHOOK_CREDENTIAL, variable: 'SLACK_URL')]) {
+                        def color = status == 'SUCCESS' ? 'good' : 'danger'
+                        sh """
+                            curl -s -X POST \$SLACK_URL \
+                                -H 'Content-type: application/json' \
+                                -d '{"channel":"${Constants.SLACK_CHANNEL}","attachments":[{"color":"${color}","text":"Build ${env.JOB_NAME} #${env.BUILD_NUMBER}: ${status}"}]}'
+                        """
+                    }
+                } catch (Exception e) {
+                    echo "Slack notification failed: ${e.message}"
+                }
+            }
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,59 @@
+replicaCount: 2
+
+image:
+  repository: <OCIR_REGION>.ocir.io/<TENANCY>/dev/auth-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+probes:
+  liveness:
+    path: /health
+    port: 3000
+  readiness:
+    path: /ready
+    port: 3000
+
+env:
+  NODE_ENV: production
+
+secrets:
+  - name: JWT_SECRET
+    secretName: auth-secrets
+    secretKey: JWT_SECRET
+
+serviceAccount:
+  create: true
+  name: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+networkPolicy:
+  enabled: true

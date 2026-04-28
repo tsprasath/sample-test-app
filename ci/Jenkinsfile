@@ -1,0 +1,159 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: node
+    image: node:20-alpine
+    command: ['sleep']
+    args: ['infinity']
+  - name: trivy
+    image: aquasec/trivy:latest
+    command: ['sleep']
+    args: ['infinity']
+  - name: gitleaks
+    image: zricethezav/gitleaks:latest
+    command: ['sleep']
+    args: ['infinity']
+  - name: yq
+    image: mikefarah/yq:4
+    command: ['sleep']
+    args: ['infinity']
+  volumes:
+  - name: docker-sock
+    emptyDir: {}
+'''
+        }
+    }
+
+    environment {
+        OCIR_REPO    = credentials('ocir-repo')
+        OCI_REGION   = credentials('oci-region')
+        GITOPS_REPO  = credentials('gitops-repo')
+        IMAGE_TAG    = "${GIT_COMMIT[0..6]}-${BUILD_NUMBER}"
+        IMAGE_NAME   = "${OCI_REGION}.ocir.io/${OCIR_REPO}/auth-service"
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                container('node') {
+                    sh 'npm ci'
+                    sh 'npm run lint'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                container('docker') {
+                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f Dockerfile ."
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                container('docker') {
+                    sh "docker run --rm ${IMAGE_NAME}:${IMAGE_TAG} npm test"
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy Image Scan') {
+                    steps {
+                        container('trivy') {
+                            sh """
+                                trivy image \
+                                    --config security/scan-configs/trivy.yaml \
+                                    --exit-code 1 \
+                                    --severity CRITICAL \
+                                    --output trivy-report.json \
+                                    ${IMAGE_NAME}:${IMAGE_TAG}
+                            """
+                            archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+                stage('Secret Detection') {
+                    steps {
+                        container('gitleaks') {
+                            sh 'gitleaks detect --source . --config security/scan-configs/.gitleaks.toml --report-format json --report-path gitleaks-report.json'
+                            archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push to OCIR') {
+            steps {
+                container('docker') {
+                    withCredentials([usernamePassword(credentialsId: 'ocir-credentials', usernameVariable: 'OCIR_USER', passwordVariable: 'OCIR_TOKEN')]) {
+                        sh "echo ${OCIR_TOKEN} | docker login ${OCI_REGION}.ocir.io -u ${OCIR_USER} --password-stdin"
+                        sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                    }
+                }
+            }
+        }
+
+        stage('GitOps Update') {
+            steps {
+                container('yq') {
+                    withCredentials([usernamePassword(credentialsId: 'git-credentials', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+                        sh """
+                            git clone https://${GIT_USER}:${GIT_TOKEN}@${GITOPS_REPO} gitops-repo
+                            cd gitops-repo
+                            yq e '.image.tag = "${IMAGE_TAG}"' -i environments/dev/values.yaml
+                            git config user.email "jenkins@ci.local"
+                            git config user.name "Jenkins CI"
+                            git add .
+                            git commit -m "chore: update auth-service image to ${IMAGE_TAG}"
+                            git push origin main
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                notifyTeam(status: 'FAILURE', channel: '#dev-alerts')
+            }
+        }
+        success {
+            script {
+                notifyTeam(status: 'SUCCESS', channel: '#dev-alerts')
+            }
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

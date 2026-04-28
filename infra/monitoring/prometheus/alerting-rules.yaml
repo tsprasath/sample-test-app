@@ -1,0 +1,118 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: custom-alerting-rules
+  namespace: monitoring
+  labels:
+    release: prometheus
+    app: kube-prometheus-stack
+spec:
+  groups:
+    - name: service-health
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            100 * sum by (service, namespace) (rate(http_requests_total{code=~"5.."}[5m]))
+            / sum by (service, namespace) (rate(http_requests_total[5m])) > 5
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High error rate on {{ $labels.service }}"
+            description: "Service {{ $labels.service }} in {{ $labels.namespace }} has error rate of {{ $value | printf \"%.1f\" }}% (>5%) for 5 minutes."
+            runbook_url: "https://wiki.internal/runbooks/high-error-rate"
+
+        - alert: HighLatency
+          expr: |
+            histogram_quantile(0.99, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High p99 latency on {{ $labels.service }}"
+            description: "Service {{ $labels.service }} p99 latency is {{ $value | printf \"%.2f\" }}s (>5s) for 5 minutes."
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[15m]) > 3
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash looping"
+            description: "Pod {{ $labels.pod }} in {{ $labels.namespace }} restarted {{ $value | printf \"%.0f\" }} times in 15 minutes."
+
+        - alert: PodNotReady
+          expr: |
+            kube_pod_status_ready{condition="true"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} not ready"
+            description: "Pod {{ $labels.pod }} in {{ $labels.namespace }} has been not ready for more than 5 minutes."
+
+    - name: security
+      rules:
+        - alert: HighWAFBlocks
+          expr: |
+            sum(rate(waf_blocked_requests_total[1m])) * 60 > 100
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High WAF block rate"
+            description: "WAF is blocking {{ $value | printf \"%.0f\" }} requests/min (>100/min)."
+
+        - alert: AuthFailureSpike
+          expr: |
+            sum(rate(auth_failure_total[1m])) * 60 > 50
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Authentication failure spike detected"
+            description: "Auth failures at {{ $value | printf \"%.0f\" }}/min (>50/min). Possible brute force attack."
+
+        - alert: CriticalVulnerabilityFound
+          expr: |
+            trivy_vulnerability_count{severity="critical"} > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Critical vulnerability in {{ $labels.image }}"
+            description: "Image {{ $labels.image }} has {{ $value | printf \"%.0f\" }} critical vulnerabilities."
+
+    - name: deployment
+      rules:
+        - alert: DeploymentFailed
+          expr: |
+            deploy_failures_total > 0 unless deploy_failures_total offset 5m > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Deployment failed for {{ $labels.service }}"
+            description: "Deployment of {{ $labels.service }} to {{ $labels.environment }} failed."
+
+        - alert: HighChangeFailureRate
+          expr: |
+            sum by (service) (increase(deploy_failures_total[7d]))
+            / sum by (service) (increase(deploy_total[7d])) > 0.15
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High change failure rate for {{ $labels.service }}"
+            description: "Service {{ $labels.service }} has a {{ $value | printf \"%.0f\" }}% change failure rate over 7 days (>15%)."
+
+        - alert: SlowLeadTime
+          expr: |
+            avg by (service) (deploy_duration_seconds) > 86400
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Slow lead time for {{ $labels.service }}"
+            description: "Service {{ $labels.service }} lead time is {{ $value | humanizeDuration }} (>24h)."

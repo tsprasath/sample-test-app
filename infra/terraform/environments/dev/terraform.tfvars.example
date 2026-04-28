@@ -1,0 +1,17 @@
+# OCI Authentication
+tenancy_ocid     = "ocid1.tenancy.oc1..aaaaaaaaXXXXXXXXXXXXXXXX"
+user_ocid        = "ocid1.user.oc1..aaaaaaaaXXXXXXXXXXXXXXXX"
+fingerprint      = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+private_key_path = "~/.oci/oci_api_key.pem"
+
+# Compartment
+compartment_id = "ocid1.compartment.oc1..aaaaaaaaXXXXXXXXXXXXXXXX"
+
+# Region
+region = "ap-mumbai-1"
+
+# Project
+project_name = "diksha"
+
+# SSH key for OKE nodes (optional)
+ssh_public_key = ""
