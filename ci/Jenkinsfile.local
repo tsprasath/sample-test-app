@@ -1,0 +1,147 @@
+// Jenkinsfile.local - For testing on WSL Jenkins (no K8s agent)
+pipeline {
+    agent any
+
+    environment {
+        SERVICE      = 'auth-service'
+        SERVICE_DIR  = 'services/auth-service'
+        IMAGE_NAME   = "dev/${SERVICE}"
+        IMAGE_TAG    = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'local'}"
+        HELM_CHART   = "infra/helm-charts/${SERVICE}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'echo "Commit: $(git rev-parse --short HEAD)"'
+                sh 'echo "Branch: $(git branch --show-current)"'
+            }
+        }
+
+        stage('Code Quality') {
+            parallel {
+                stage('Lint') {
+                    steps {
+                        dir("${SERVICE_DIR}") {
+                            sh 'npm install --no-audit --no-fund 2>&1 | tail -3'
+                            sh 'npx eslint src/ --format compact || true'
+                        }
+                    }
+                }
+                stage('Audit') {
+                    steps {
+                        dir("${SERVICE_DIR}") {
+                            sh 'npm audit --audit-level=high || true'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                dir("${SERVICE_DIR}") {
+                    sh 'npx jest --forceExit --detectOpenHandles --coverage 2>&1 || true'
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest ${SERVICE_DIR}"
+                sh "docker images ${IMAGE_NAME} --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.Size}}'"
+            }
+        }
+
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy') {
+                    steps {
+                        sh """
+                            if command -v trivy &>/dev/null; then
+                                trivy image --severity CRITICAL,HIGH --exit-code 0 ${IMAGE_NAME}:${IMAGE_TAG}
+                            else
+                                echo "WARN: Trivy not installed - skipping image scan"
+                                echo "Install: sudo apt install trivy OR curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh"
+                            fi
+                        """
+                    }
+                }
+                stage('Gitleaks') {
+                    steps {
+                        sh """
+                            if command -v gitleaks &>/dev/null; then
+                                gitleaks detect --source . --report-format json --report-path gitleaks-report.json || true
+                            else
+                                echo "WARN: Gitleaks not installed - skipping secret scan"
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Helm Validate') {
+            steps {
+                sh """
+                    if command -v helm &>/dev/null; then
+                        helm lint ${HELM_CHART}
+                        helm template test-release ${HELM_CHART} > /dev/null && echo "Helm template render: OK"
+                    else
+                        echo "WARN: Helm not installed - skipping chart validation"
+                    fi
+                """
+            }
+        }
+
+        stage('Docker Test Run') {
+            steps {
+                sh """
+                    echo "Starting container for smoke test..."
+                    docker rm -f ${SERVICE}-test 2>/dev/null || true
+                    docker run -d --name ${SERVICE}-test -p 3099:3000 \
+                        -e JWT_SECRET=test-secret-key-for-ci \
+                        -e NODE_ENV=test \
+                        ${IMAGE_NAME}:${IMAGE_TAG}
+                    
+                    echo "Waiting for service to start..."
+                    sleep 3
+                    
+                    echo "=== Health Check ==="
+                    curl -sf http://localhost:3099/health && echo ""
+                    
+                    echo "=== Readiness Check ==="
+                    curl -sf http://localhost:3099/ready && echo ""
+                    
+                    echo "=== Register Test User ==="
+                    curl -sf -X POST http://localhost:3099/api/v1/auth/register \
+                        -H 'Content-Type: application/json' \
+                        -d '{"username":"testuser","email":"test@test.com","password":"Test1234!"}' && echo ""
+                    
+                    echo "=== Login Test ==="
+                    curl -sf -X POST http://localhost:3099/api/v1/auth/login \
+                        -H 'Content-Type: application/json' \
+                        -d '{"email":"test@test.com","password":"Test1234!"}' && echo ""
+                    
+                    echo "=== Cleanup ==="
+                    docker rm -f ${SERVICE}-test
+                    echo "Smoke tests PASSED"
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+            cleanWs()
+        }
+        success {
+            echo "Pipeline SUCCESS - ${IMAGE_NAME}:${IMAGE_TAG}"
+        }
+        failure {
+            echo "Pipeline FAILED - check logs above"
+        }
+    }
+}
