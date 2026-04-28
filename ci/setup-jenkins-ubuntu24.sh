@@ -96,9 +96,10 @@ if systemctl is-active --quiet jenkins 2>/dev/null; then
     fi
 fi
 
-# Add Jenkins LTS repo
+# Add Jenkins LTS repo (use current key)
 curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
-    | gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.gpg 2>/dev/null
+    | gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.gpg 2>/dev/null || \
+    tee /usr/share/keyrings/jenkins-keyring.gpg > /dev/null
 echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/" \
     > /etc/apt/sources.list.d/jenkins.list
 apt-get update -qq
@@ -180,6 +181,9 @@ GROOVY
 sed -i "s/ADMIN_USER_PLACEHOLDER/${JENKINS_ADMIN_USER}/g" "${JENKINS_HOME}/init.groovy.d/01-admin-user.groovy"
 sed -i "s/ADMIN_PASS_PLACEHOLDER/${JENKINS_ADMIN_PASS}/g" "${JENKINS_HOME}/init.groovy.d/01-admin-user.groovy"
 sed -i "s/JENKINS_PORT_PLACEHOLDER/${JENKINS_PORT}/g"     "${JENKINS_HOME}/init.groovy.d/01-admin-user.groovy"
+
+# Clear stale user dirs (from previous installs) so fresh realm works
+rm -rf "${JENKINS_HOME}/users/"*
 
 chown -R jenkins:jenkins "${JENKINS_HOME}/init.groovy.d"
 log "Admin: ${JENKINS_ADMIN_USER} / ${JENKINS_ADMIN_PASS}"
@@ -369,13 +373,11 @@ PLUGINS=(
     parameterized-trigger        # Trigger parameterized builds
 )
 
-echo "Installing ${#PLUGINS[@]} plugins..."
-for plugin in "${PLUGINS[@]}"; do
-    install_plugin "$plugin" &
-    # Throttle: max 5 parallel installs
-    [[ $(jobs -r -p | wc -l) -ge 5 ]] && wait -n
-done
-wait
+echo "Installing ${#PLUGINS[@]} plugins in one batch..."
+java -jar "${CLI_JAR}" \
+    -s "http://localhost:${JENKINS_PORT}" \
+    -auth "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PASS}" \
+    install-plugin "${PLUGINS[@]}" -deploy 2>&1 | while read -r line; do echo "  $line"; done
 log "Plugin installation complete"
 
 # Restart to activate plugins
