@@ -35,8 +35,9 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    env.GIT_SHA  = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
-                    env.IMAGE_TAG = "${env.GIT_SHA}-${BUILD_NUMBER}"
+                    def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    env.GIT_SHA = sha
+                    env.IMAGE_TAG = sha + '-' + env.BUILD_NUMBER
                     echo "============================================="
                     echo "  Service:  ${SERVICE}"
                     echo "  Image:    ${env.IMAGE_NAME}:${env.IMAGE_TAG}"
@@ -108,15 +109,15 @@ pipeline {
                 sh """
                     echo "--- Building Docker image ---"
                     docker build \\
-                        -t ${IMAGE_NAME}:${IMAGE_TAG} \\
-                        -t ${IMAGE_NAME}:latest \\
-                        --label "git.sha=${GIT_SHA}" \\
+                        -t ${env.IMAGE_NAME}:${env.IMAGE_TAG} \\
+                        -t ${env.IMAGE_NAME}:latest \\
+                        --label "git.sha=${env.GIT_SHA}" \\
                         --label "build.number=${BUILD_NUMBER}" \\
                         ${SERVICE_DIR}
 
                     echo ""
                     echo "--- Image details ---"
-                    docker images ${IMAGE_NAME} --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.Size}}'
+                    docker images ${env.IMAGE_NAME} --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.Size}}'
                 """
             }
         }
@@ -138,7 +139,7 @@ pipeline {
                                 --severity CRITICAL,HIGH \\
                                 --exit-code 0 \\
                                 --format table \\
-                                ${IMAGE_NAME}:${IMAGE_TAG}
+                                ${env.IMAGE_NAME}:${env.IMAGE_TAG}
                         """
                     }
                 }
@@ -184,12 +185,12 @@ pipeline {
 
                     echo "--- Helm template render ---"
                     helm template test-release ${HELM_CHART} \\
-                        --set image.tag=${IMAGE_TAG} \\
+                        --set image.tag=${env.IMAGE_TAG} \\
                         > /dev/null && echo "Template render: OK"
 
                     echo "--- Helm dry-run ---"
                     helm template test-release ${HELM_CHART} \\
-                        --set image.tag=${IMAGE_TAG} \\
+                        --set image.tag=${env.IMAGE_TAG} \\
                         | head -30
                 """
             }
@@ -205,9 +206,9 @@ pipeline {
                     docker rm -f ${SERVICE}-test 2>/dev/null || true
                     docker run -d --name ${SERVICE}-test \\
                         -p ${TEST_PORT}:3000 \\
-                        -e JWT_SECRET=ci-test-secret-key \\
+                        -e JWT_SECRET=ci-tes...-key \\
                         -e NODE_ENV=test \\
-                        ${IMAGE_NAME}:${IMAGE_TAG}
+                        ${env.IMAGE_NAME}:${env.IMAGE_TAG}
 
                     echo "Waiting for service startup..."
                     sleep 4
@@ -224,14 +225,14 @@ pipeline {
                     echo "--- Register User ---"
                     curl -sf -X POST http://localhost:${TEST_PORT}/api/v1/auth/register \\
                         -H 'Content-Type: application/json' \\
-                        -d '{"username":"ci-test","email":"ci@test.com","password":"T3st!ng@CI"}' \\
+                        -d '{"username":"ci-test","email":"ci@test.com","password": "***"}' \\
                         | python3 -m json.tool 2>/dev/null || true
 
                     echo ""
                     echo "--- Login ---"
                     curl -sf -X POST http://localhost:${TEST_PORT}/api/v1/auth/login \\
                         -H 'Content-Type: application/json' \\
-                        -d '{"email":"ci@test.com","password":"T3st!ng@CI"}' \\
+                        -d '{"email":"ci@test.com","password": "***"}' \\
                         | python3 -m json.tool 2>/dev/null || true
 
                     echo ""
