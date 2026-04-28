@@ -38,7 +38,6 @@ pipeline {
                 script {
                     def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
                     def branch = (env.GIT_BRANCH ?: 'main').replaceAll('^origin/', '').replaceAll('[^a-zA-Z0-9._-]', '_')
-                    println "DEBUG: sha=[${sha}] branch=[${branch}] BUILD_NUMBER=[${env.BUILD_NUMBER}]"
                     env.GIT_SHA = sha
                     env.GIT_BRANCH_CLEAN = branch
                     env.IMAGE_TAG = "${branch}_${sha}_${env.BUILD_NUMBER}"
