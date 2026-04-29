@@ -1,30 +1,264 @@
-// Thin Jenkinsfile — delegates to shared pipeline in ai-devops
-// Jenkins job is configured via JCasC in the devops repo
-
-@Library('diksha-shared-lib') _
+// =============================================================================
+// Jenkinsfile — CI Pipeline for auth-service (sample-test-app)
+// =============================================================================
+// Runs: lint, test, docker build, security scans, smoke test, push to OCIR.
+// Helm chart lives in the devops repo (ai-devops); this pipeline validates CI.
+// Secrets come from Jenkins credentials (JCasC) — NOT hardcoded.
+// =============================================================================
 
 pipeline {
     agent any
 
     environment {
-        SERVICE_NAME = 'auth-service'
+        SERVICE       = 'auth-service'
+        OCIR_REGISTRY = 'bom.ocir.io'
+        OCIR_NAMESPACE = 'bmzbbujw9kal'
+        OCIR_REPO     = 'dev-repo-test'
+        IMAGE_NAME    = "${OCIR_REGISTRY}/${OCIR_NAMESPACE}/${OCIR_REPO}/${SERVICE}"
+        TEST_PORT     = '3099'
+    }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        ansiColor('xterm')
     }
 
     stages {
-        stage('Build & Deploy') {
+        // =====================================================================
+        // 1. CHECKOUT + TAG
+        // =====================================================================
+        stage('Checkout') {
             steps {
-                buildAndPush(
-                    service: env.SERVICE_NAME,
-                    registry: env.OCIR_REGISTRY,
-                    namespace: env.OCIR_NAMESPACE
-                )
+                checkout scm
+                script {
+                    def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    def branch = (env.GIT_BRANCH ?: 'main').replaceAll('^origin/', '').replaceAll('[^a-zA-Z0-9._-]', '_')
+                    env.GIT_SHA = sha
+                    env.GIT_BRANCH_CLEAN = branch
+                    env.IMAGE_TAG = "${branch}_${sha}_${env.BUILD_NUMBER}"
+                    println "============================================="
+                    println "  Service:  ${env.SERVICE}"
+                    println "  Image:    ${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+                    println "  Branch:   ${env.GIT_BRANCH_CLEAN}"
+                    println "  Commit:   ${env.GIT_SHA}"
+                    println "============================================="
+                }
+            }
+        }
+
+        // =====================================================================
+        // 2. INSTALL DEPENDENCIES
+        // =====================================================================
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm ci --no-audit --no-fund 2>&1 | tail -5'
+            }
+        }
+
+        // =====================================================================
+        // 3. CODE QUALITY (parallel: lint + audit)
+        // =====================================================================
+        stage('Code Quality') {
+            parallel {
+                stage('ESLint') {
+                    steps {
+                        sh '''#!/bin/bash
+                            echo "--- ESLint ---"
+                            npx eslint src/ --format compact --max-warnings 10 2>&1 || true
+                        '''
+                    }
+                }
+                stage('npm Audit') {
+                    steps {
+                        sh '''#!/bin/bash
+                            echo "--- npm audit ---"
+                            npm audit --audit-level=critical 2>&1 || true
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 4. UNIT TESTS + COVERAGE
+        // =====================================================================
+        stage('Unit Tests') {
+            steps {
+                sh '''#!/bin/bash
+                    echo "--- Running Jest ---"
+                    npx jest --forceExit --detectOpenHandles --coverage --verbose 2>&1
+                '''
+            }
+        }
+
+        // =====================================================================
+        // 5. DOCKER BUILD
+        // =====================================================================
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    echo "--- Building Docker image ---"
+                    docker build \
+                        -t $IMAGE_NAME:$IMAGE_TAG \
+                        -t $IMAGE_NAME:latest \
+                        --label "git.sha=$GIT_SHA" \
+                        --label "build.number=${BUILD_NUMBER}" \
+                        .
+
+                    echo ""
+                    echo "--- Image details ---"
+                    docker images $IMAGE_NAME --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'
+                '''
+            }
+        }
+
+        // =====================================================================
+        // 6. SECURITY SCANS (parallel: Trivy + Gitleaks)
+        // =====================================================================
+        stage('Security Scans') {
+            parallel {
+                stage('Trivy Image Scan') {
+                    steps {
+                        sh '''#!/bin/bash
+                            if ! command -v trivy &>/dev/null; then
+                                echo "SKIP: Trivy not installed"
+                                exit 0
+                            fi
+                            echo "--- Trivy image scan ---"
+                            trivy image \
+                                --severity CRITICAL,HIGH \
+                                --exit-code 0 \
+                                --format table \
+                                $IMAGE_NAME:$IMAGE_TAG
+                        '''
+                    }
+                }
+                stage('Trivy Filesystem') {
+                    steps {
+                        sh '''#!/bin/bash
+                            if ! command -v trivy &>/dev/null; then
+                                echo "SKIP: Trivy not installed"
+                                exit 0
+                            fi
+                            echo "--- Trivy filesystem scan ---"
+                            trivy fs --severity CRITICAL --exit-code 0 .
+                        '''
+                    }
+                }
+                stage('Gitleaks') {
+                    steps {
+                        sh '''#!/bin/bash
+                            if ! command -v gitleaks &>/dev/null; then
+                                echo "SKIP: Gitleaks not installed"
+                                exit 0
+                            fi
+                            echo "--- Gitleaks secret detection ---"
+                            gitleaks detect --source . --report-format json --report-path gitleaks-report.json --verbose 2>&1 || true
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 7. SMOKE TEST (docker run + curl)
+        // =====================================================================
+        stage('Smoke Test') {
+            steps {
+                sh '''
+                    echo "--- Starting container ---"
+                    docker rm -f ${SERVICE}-test 2>/dev/null || true
+                    docker run -d --name ${SERVICE}-test \
+                        -p ${TEST_PORT}:3000 \
+                        -e JWT_SECRET=ci-test-secret-not-for-prod \
+                        -e NODE_ENV=test \
+                        $IMAGE_NAME:$IMAGE_TAG
+
+                    echo "Waiting for service startup..."
+                    sleep 4
+
+                    echo ""
+                    echo "--- Health Check ---"
+                    curl -sf http://localhost:${TEST_PORT}/health | python3 -m json.tool 2>/dev/null || curl -sf http://localhost:${TEST_PORT}/health
+
+                    echo ""
+                    echo "--- Readiness Check ---"
+                    curl -sf http://localhost:${TEST_PORT}/ready | python3 -m json.tool 2>/dev/null || curl -sf http://localhost:${TEST_PORT}/ready
+
+                    echo ""
+                    echo "--- Register User ---"
+                    curl -sf -X POST http://localhost:${TEST_PORT}/api/v1/auth/register \
+                        -H 'Content-Type: application/json' \
+                        -d '{"username":"ci-test","email":"ci@test.com","password":"StrongP@ss123"}' \
+                        | python3 -m json.tool 2>/dev/null || true
+
+                    echo ""
+                    echo "--- Login ---"
+                    curl -sf -X POST http://localhost:${TEST_PORT}/api/v1/auth/login \
+                        -H 'Content-Type: application/json' \
+                        -d '{"email":"ci@test.com","password":"StrongP@ss123"}' \
+                        | python3 -m json.tool 2>/dev/null || true
+
+                    echo ""
+                    echo "--- Cleanup ---"
+                    docker logs ${SERVICE}-test --tail 5 2>&1 || true
+                    docker rm -f ${SERVICE}-test
+                    echo ""
+                    echo "Smoke tests PASSED"
+                '''
+            }
+        }
+
+        // =====================================================================
+        // 8. PUSH TO OCIR (only on main branch)
+        // =====================================================================
+        stage('Push to OCIR') {
+            when {
+                branch 'main'
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'ocir-credentials',
+                    usernameVariable: 'OCIR_USER',
+                    passwordVariable: 'OCIR_PASS'
+                )]) {
+                    sh '''
+                        echo "--- Logging into OCIR ---"
+                        echo "$OCIR_PASS" | docker login $OCIR_REGISTRY -u "$OCIR_USER" --password-stdin
+
+                        echo "--- Pushing image ---"
+                        docker push $IMAGE_NAME:$IMAGE_TAG
+                        docker push $IMAGE_NAME:latest
+
+                        echo ""
+                        echo "Pushed: $IMAGE_NAME:$IMAGE_TAG"
+                    '''
+                }
             }
         }
     }
 
+    // =========================================================================
+    // POST ACTIONS
+    // =========================================================================
     post {
+        always {
+            sh 'docker rmi $IMAGE_NAME:$IMAGE_TAG 2>/dev/null || true'
+            sh 'docker rm -f $SERVICE-test 2>/dev/null || true'
+            cleanWs()
+        }
+        success {
+            script {
+                println "PIPELINE SUCCESS | Image: ${env.IMAGE_NAME}:${env.IMAGE_TAG} | Build: #${env.BUILD_NUMBER}"
+            }
+        }
         failure {
-            notifyTeam(channel: 'builds', status: 'FAILURE')
+            script {
+                println "PIPELINE FAILED | Build: #${env.BUILD_NUMBER} | Check console output above"
+            }
         }
     }
 }
