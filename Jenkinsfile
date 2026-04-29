@@ -10,7 +10,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Branch to build')
+        string(name: 'BRANCH', defaultValue: 'main', description: 'Branch or tag to build (e.g. main, feature/xyz, v1.0.0)')
     }
 
     environment {
@@ -38,7 +38,7 @@ pipeline {
             steps {
                 checkout([
                     $class: 'GitSCM',
-                    branches: [[name: "*/${params.BRANCH}"]],
+                    branches: [[name: "${params.BRANCH}"]],
                     userRemoteConfigs: scm.userRemoteConfigs
                 ])
                 script {
@@ -246,7 +246,9 @@ pipeline {
         // =====================================================================
         stage('Push to OCIR') {
             when {
-                branch 'main'
+                expression {
+                    return params.BRANCH == 'main' || params.BRANCH.startsWith('v')
+                }
             }
             steps {
                 withCredentials([usernamePassword(
