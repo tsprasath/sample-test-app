@@ -1,0 +1,283 @@
+# ═══════════════════════════════════════════════════════════════════
+# Jenkins Configuration as Code (JCasC) — AI DevOps Platform
+# ═══════════════════════════════════════════════════════════════════
+# Mount at: /var/jenkins_home/casc_configs/jenkins.yml
+# Or set:   CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs/jenkins.yml
+#
+# All ${VAR} references resolve from the Jenkins process environment.
+# Set via K8s Secret → env, Docker -e, or systemd EnvironmentFile.
+# See: ci/config/env.example for the full variable list.
+# ═══════════════════════════════════════════════════════════════════
+
+# ─── Jenkins Core ─────────────────────────────────────────────────
+jenkins:
+  systemMessage: >-
+    AI DevOps Platform — Jenkins CI + ArgoCD GitOps.
+    Managed by JCasC (ci/config/jenkins.yml). Do not configure manually.
+
+  numExecutors: 0  # Builds run on agents only
+
+  # ── Security Realm ──────────────────────────────────────────────
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_USER:-admin}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:${JENKINS_ADMIN_USER:-admin}"
+        - "Overall/Read:authenticated"
+        - "Job/Build:authenticated"
+        - "Job/Read:authenticated"
+        - "Job/Workspace:authenticated"
+
+  # ── Global Environment Variables ────────────────────────────────
+  # Available as env.VAR_NAME in every pipeline and shared library.
+  # These replace the hardcoded Constants.groovy values.
+  globalNodeProperties:
+    - envVars:
+        env:
+          # ── OCI / Registry ──
+          - key: OCI_REGION
+            value: "${OCI_REGION:-ap-mumbai-1}"
+          - key: OCIR_URL
+            value: "${OCIR_URL:-bom.ocir.io}"
+          - key: OCIR_NAMESPACE
+            value: "${OCIR_NAMESPACE:-diksha}"
+          - key: PROJECT_NAME
+            value: "${PROJECT_NAME:-diksha-dev}"
+          # ── GitOps (this devops repo — where Helm values live) ──
+          - key: GITOPS_REPO
+            value: "${GITOPS_REPO:-https://github.com/tsprasath/ai-devops.git}"
+          - key: GITOPS_BRANCH
+            value: "${GITOPS_BRANCH:-main}"
+          # ── App Repos (source code repos) ──
+          - key: AUTH_SERVICE_REPO
+            value: "${AUTH_SERVICE_REPO:-https://github.com/tsprasath/sample-test-app.git}"
+          # ── Notifications ──
+          - key: TEAMS_WEBHOOK_URL
+            value: "${TEAMS_WEBHOOK_URL}"
+          - key: SLACK_CHANNEL
+            value: "${SLACK_CHANNEL:-#ci-cd-notifications}"
+          - key: SLACK_CHANNEL_ALERTS
+            value: "${SLACK_CHANNEL_ALERTS:-#ci-cd-alerts}"
+          # ── Trivy defaults ──
+          - key: TRIVY_SEVERITY
+            value: "${TRIVY_SEVERITY:-CRITICAL,HIGH}"
+          - key: TRIVY_HIGH_THRESHOLD
+            value: "${TRIVY_HIGH_THRESHOLD:-5}"
+
+  # ── Kubernetes Cloud (OKE pod agents) ───────────────────────────
+  clouds:
+    - kubernetes:
+        name: "oke"
+        serverUrl: "${OKE_API_SERVER}"
+        namespace: "${JENKINS_AGENT_NAMESPACE:-jenkins}"
+        jenkinsUrl: "${JENKINS_URL:-http://jenkins.jenkins.svc.cluster.local:8080}"
+        jenkinsTunnel: "${JENKINS_TUNNEL:-jenkins-agent.jenkins.svc.cluster.local:50000}"
+        credentialsId: "oke-kubeconfig"
+        podLabels:
+          - key: "jenkins"
+            value: "agent"
+        templates:
+          - name: "build-pod"
+            label: "build-agent docker"
+            yamlFile: "ci/pod-templates/build-pod.yaml"
+            serviceAccount: "${JENKINS_SA:-jenkins-agent}"
+            idleMinutes: 5
+
+# ─── Tools ────────────────────────────────────────────────────────
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "/usr/bin/git"
+  nodejs:
+    installations:
+      - name: "NodeJS-20"
+        home: ""
+        properties:
+          - installSource:
+              installers:
+                - nodeJSInstaller:
+                    id: "20.11.0"
+
+# ─── Global Libraries ────────────────────────────────────────────
+unclassified:
+  globalLibraries:
+    libraries:
+      - name: "diksha-dev-lib"
+        defaultVersion: "main"
+        implicit: false
+        allowVersionOverride: true
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "${SHARED_LIB_REPO:-https://github.com/tsprasath/ai-devops.git}"
+                credentialsId: "git-credentials"
+            libraryPath: "ci/shared-lib"
+
+  gitSCM:
+    globalConfigName: "Jenkins CI"
+    globalConfigEmail: "jenkins@diksha.dev"
+
+# ─── Jobs ─────────────────────────────────────────────────────────
+# Split-repo pattern: one parameterized pipeline per service.
+# App repos trigger these via webhook → Jenkinsfile.app-repo template.
+# To add a new service, copy the auth-service block and change the defaults.
+jobs:
+  # ── Service Build: auth-service ────────────────────────────────
+  # Triggered by app repo webhook OR manually with parameters.
+  - script: >
+      pipelineJob('service-build-auth-service') {
+        description('Build auth-service from app repo, push to OCIR, update GitOps values')
+        parameters {
+          stringParam('APP_REPO_URL', '${AUTH_SERVICE_REPO:-https://github.com/tsprasath/sample-test-app.git}', 'App source repo URL')
+          stringParam('APP_REPO_BRANCH', 'main', 'Branch to build')
+          stringParam('SERVICE_NAME', 'auth-service', 'Service name (matches Helm chart dir)')
+          stringParam('SERVICE_DIR', '.', 'Path to Dockerfile in app repo')
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${SHARED_LIB_REPO:-https://github.com/tsprasath/ai-devops.git}')
+                  credentials('git-credentials')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('ci/Jenkinsfile')
+          }
+        }
+        properties {
+          disableConcurrentBuilds()
+          pipelineTriggers {
+            triggers {
+              genericTrigger {
+                genericVariables {
+                  genericVariable { key('ref'); value('$.ref') }
+                  genericVariable { key('repo_url'); value('$.repository.clone_url') }
+                }
+                regexpFilterText('$ref')
+                regexpFilterExpression('^refs/heads/(main|develop|release/.*)$')
+                tokenCredentialId('')
+                causeString('GitHub push to $ref')
+                printContributedVariables(true)
+              }
+            }
+          }
+        }
+        logRotator {
+          numToKeep(20)
+        }
+      }
+
+  # ── PR Validation (runs from app repos, test-only, no deploy) ──
+  - script: >
+      multibranchPipelineJob('ai-devops-pr') {
+        description('PR validation — lint, test, scan (no push, no deploy)')
+        branchSources {
+          github {
+            id('ai-devops-pr')
+            repoOwner('tsprasath')
+            repository('ai-devops')
+            credentialsId('git-credentials')
+            buildForkPRMerge(true)
+            buildOriginBranch(false)
+            buildOriginPRMerge(true)
+          }
+        }
+        factory {
+          workflowBranchProjectFactory {
+            scriptPath('ci/Jenkinsfile.pr')
+          }
+        }
+        orphanedItemStrategy {
+          discardOldItems {
+            numToKeep(10)
+          }
+        }
+      }
+
+  # ── Local Dev Pipeline ─────────────────────────────────────────
+  - script: >
+      pipelineJob('ai-devops-local') {
+        description('Local/WSL dev pipeline — no K8s, no shared lib')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${SHARED_LIB_REPO:-https://github.com/tsprasath/ai-devops.git}')
+                  credentials('git-credentials')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('ci/Jenkinsfile.local')
+          }
+        }
+        properties {
+          disableConcurrentBuilds()
+        }
+        logRotator {
+          numToKeep(10)
+        }
+      }
+
+# ─── Credentials ─────────────────────────────────────────────────
+# All secrets injected from environment variables. NEVER commit real values.
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # ── OCIR (Oracle Cloud Container Registry) ──────────────
+          - usernamePassword:
+              scope: GLOBAL
+              id: "ocir-credentials"
+              username: "${OCIR_USERNAME}"
+              password: "${OCIR_PASSWORD}"
+              description: "OCI Container Registry"
+
+          # ── GitHub token (for gitops updates + PR status) ───────
+          - usernamePassword:
+              scope: GLOBAL
+              id: "git-credentials"
+              username: "${GIT_USERNAME:-jenkins}"
+              password: "${GIT_TOKEN}"
+              description: "GitHub PAT for repo access and gitops updates"
+
+          # ── OKE Kubeconfig (for K8s cloud agent) ────────────────
+          - file:
+              scope: GLOBAL
+              id: "oke-kubeconfig"
+              fileName: "kubeconfig"
+              secretBytes: "${OKE_KUBECONFIG_B64}"
+              description: "OKE cluster kubeconfig"
+
+          # ── Slack Webhook ───────────────────────────────────────
+          - string:
+              scope: GLOBAL
+              id: "slack-webhook-url"
+              secret: "${SLACK_WEBHOOK_URL}"
+              description: "Slack incoming webhook"
+
+          # ── Teams Webhook ───────────────────────────────────────
+          - string:
+              scope: GLOBAL
+              id: "teams-webhook-url"
+              secret: "${TEAMS_WEBHOOK_URL}"
+              description: "Microsoft Teams incoming webhook"
+
+          # ── SonarQube Token (optional) ──────────────────────────
+          - string:
+              scope: GLOBAL
+              id: "sonar-token"
+              secret: "${SONAR_TOKEN}"
+              description: "SonarQube analysis token"

@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ═══════════════════════════════════════════════════════
+# PROD Environment Bootstrap
+# ═══════════════════════════════════════════════════════
+
+resources:
+  - ../../base
+
+nameSuffix: "-prod"
+namespace: diksha-app-prod
+
+commonLabels:
+  diksha.dev/environment: prod
+
+patches:
+  # Prod uses base quota values (already prod-sized)
+  - target:
+      kind: Namespace
+    patch: |
+      - op: add
+        path: /metadata/labels/diksha.dev~1environment
+        value: prod
+
+  # Stricter limits for prod
+  - target:
+      kind: LimitRange
+      name: app-limits
+    patch: |
+      - op: replace
+        path: /spec/limits/0/defaultRequest/cpu
+        value: 250m
+      - op: replace
+        path: /spec/limits/0/defaultRequest/memory
+        value: 256Mi

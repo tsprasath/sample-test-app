@@ -5,26 +5,30 @@ metadata:
   namespace: argocd
   labels:
     app.kubernetes.io/name: auth-service
-    app.kubernetes.io/part-of: dev-platform
-    environment: prod
+    app.kubernetes.io/part-of: diksha-dev
+    diksha.dev/environment: prod
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
-    repoURL: https://github.com/org/gitops-repo.git
+    repoURL: https://github.com/tsprasath/ai-devops.git
     targetRevision: main
-    path: charts/auth-service
+    path: infra/helm-charts/auth-service
     helm:
       valueFiles:
-        - ../../environments/prod/values.yaml
+        - values.yaml           # base defaults
+        - values-prod.yaml    # env-specific (Jenkins updates image.tag here)
   destination:
     server: https://kubernetes.default.svc
-    namespace: prod
+    namespace: diksha-app-prod
   syncPolicy:
+    # PROD: manual sync only — no automated deployment
+    automated: null
     syncOptions:
-      - CreateNamespace=true
+      - CreateNamespace=false    # Bootstrap creates namespaces
       - PrunePropagationPolicy=foreground
+      - ServerSideApply=true
     retry:
       limit: 3
       backoff:

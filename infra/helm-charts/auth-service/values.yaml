@@ -1,9 +1,19 @@
+# ═══════════════════════════════════════════════════════
+# auth-service — Base Helm Values (shared defaults)
+# ═══════════════════════════════════════════════════════
+# Per-env overrides: values-dev.yaml, values-staging.yaml, values-prod.yaml
+# Jenkins CI updates image.tag in the environment-specific file.
+# ArgoCD merges base + env values at deploy time.
+
 replicaCount: 2
 
 image:
-  repository: <OCIR_REGION>.ocir.io/<TENANCY>/dev/auth-service
-  tag: latest
+  repository: bom.ocir.io/diksha/diksha-dev/auth-service
+  tag: latest    # ← Jenkins CI overwrites this in values-{env}.yaml
   pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ocir-registry
 
 service:
   type: ClusterIP
@@ -30,9 +40,13 @@ probes:
   liveness:
     path: /health
     port: 3000
+    initialDelaySeconds: 15
+    periodSeconds: 10
   readiness:
     path: /ready
     port: 3000
+    initialDelaySeconds: 5
+    periodSeconds: 5
 
 env:
   NODE_ENV: production
@@ -54,6 +68,9 @@ podSecurityContext:
 containerSecurityContext:
   readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
+
+podAnnotations:
+  reloader.stakater.com/auto: "true"
 
 networkPolicy:
   enabled: true

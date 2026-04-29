@@ -1,0 +1,99 @@
+---
+# ═══════════════════════════════════════════════════════
+# Stakater Reloader — Auto-restart pods on Secret/ConfigMap changes
+# ═══════════════════════════════════════════════════════
+# Deployed to diksha-infra namespace.
+# Watches Secrets/ConfigMaps annotated with:
+#   reloader.stakater.com/match: "true"
+# When the data changes (e.g., OCIR token rotation), Reloader
+# triggers a rolling restart of Deployments/StatefulSets that
+# reference them.
+#
+# Install via Helm (the bootstrap.sh script handles this):
+#   helm repo add stakater https://stakater.github.io/stakater-charts
+#   helm install reloader stakater/reloader -n diksha-infra-{env} \
+#     --set reloader.watchGlobally=true
+#
+# Or use this manifest for a minimal Reloader deployment:
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reloader
+  namespace: diksha-infra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: reloader-role
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["list", "get", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["list", "get", "patch", "update"]
+  - apiGroups: ["extensions"]
+    resources: ["deployments"]
+    verbs: ["list", "get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: reloader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: reloader-role
+subjects:
+  - kind: ServiceAccount
+    name: reloader
+    namespace: diksha-infra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reloader
+  namespace: diksha-infra
+  labels:
+    app: reloader
+    app.kubernetes.io/name: reloader
+    app.kubernetes.io/managed-by: ai-devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reloader
+  template:
+    metadata:
+      labels:
+        app: reloader
+    spec:
+      serviceAccountName: reloader
+      containers:
+        - name: reloader
+          image: ghcr.io/stakater/reloader:v1.0.72
+          args:
+            - --resources-to-reload=deployment,statefulset,daemonset
+            - --log-format=json
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9090
