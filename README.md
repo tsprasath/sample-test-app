@@ -3,7 +3,7 @@
 Sample Node.js auth service — template for onboarding apps into the DIKSHA split-repo GitOps pipeline.
 
 **App repo:** `git@github.com:tsprasath/sample-test-app.git`
-**DevOps repo:** `git@github.com:tsprasath/ai-devops.git` (CI/CD, Helm, ArgoCD, infra)
+**DevOps repo:** `git@github.com:tsprasath/ai-devops.git` (Helm charts, ArgoCD, infra)
 
 ---
 
@@ -20,7 +20,7 @@ Sample Node.js auth service — template for onboarding apps into the DIKSHA spl
 ├── .dockerignore
 ├── .eslintrc.json
 ├── .env.example               # Local dev env vars
-├── Jenkinsfile                # Thin trigger — calls shared pipeline in ai-devops
+├── Jenkinsfile                # Full self-contained CI pipeline
 └── package.json
 ```
 
@@ -34,18 +34,59 @@ npm test                       # jest with coverage
 npm run lint
 ```
 
-## How CI/CD Works
+## CI Pipeline (Jenkinsfile)
 
-1. Push to `main` triggers the `Jenkinsfile` in this repo
-2. Jenkins runs the shared pipeline from `ai-devops` — build, test, scan (Trivy/Gitleaks), push to OCIR
-3. Jenkins updates the image tag in `ai-devops/infra/helm-charts/auth-service/values-dev.yaml`
-4. ArgoCD detects the change and deploys to OKE
+The `Jenkinsfile` in this repo is a **self-contained CI pipeline** — no shared library dependency. It runs:
 
-See [ai-devops](https://github.com/tsprasath/ai-devops/tree/jcasc-gitops-bootstrap) for full pipeline, Helm charts, and infra.
+| Stage | What it does |
+|-------|-------------|
+| **Checkout** | Clones repo, generates image tag (`branch_sha_buildnum`) |
+| **Install Dependencies** | `npm ci` |
+| **Code Quality** | ESLint + npm audit (parallel) |
+| **Unit Tests** | Jest with coverage |
+| **Docker Build** | Multi-stage build, tagged for OCIR |
+| **Security Scans** | Trivy image/filesystem + Gitleaks (parallel, skipped if not installed) |
+| **Smoke Test** | Docker run → health check → register → login → cleanup |
+| **Push to OCIR** | Only on `main` branch, uses `ocir-credentials` from Jenkins |
+
+### Jenkins Setup
+
+Create a Pipeline job pointing to this repo:
+- **SCM:** Git → `https://github.com/tsprasath/sample-test-app.git`
+- **Branch:** `*/main`
+- **Script Path:** `Jenkinsfile`
+
+Required Jenkins credentials (for OCIR push on main):
+- `ocir-credentials` — Username/Password for OCI Registry
+
+### Environment Variables
+
+The pipeline uses these (all hardcoded in Jenkinsfile, no external config needed):
+
+| Variable | Value |
+|----------|-------|
+| `OCIR_REGISTRY` | `bom.ocir.io` |
+| `OCIR_NAMESPACE` | `bmzbbujw9kal` |
+| `OCIR_REPO` | `dev-repo-test` |
+| `SERVICE` | `auth-service` |
+| `TEST_PORT` | `3099` |
+
+## How CD Works
+
+1. Push to `main` → Jenkins CI runs → image pushed to OCIR
+2. Image tag updated in `ai-devops/kubernetes/helm-charts/auth-service/values.yaml`
+3. ArgoCD detects the change and deploys to OKE
+
+### Runtime Config
+
+- **Non-secrets** (NODE_ENV, PORT, LOG_LEVEL) → Kubernetes ConfigMap (from Helm `values.config`)
+- **Secrets** (JWT_SECRET, DB_PASSWORD, REDIS_PASSWORD) → HashiCorp Vault via CSI driver
+
+See [ai-devops SETUP.md](https://github.com/tsprasath/ai-devops/blob/main/ci/SETUP.md) for Vault + ConfigMap setup.
 
 ## Onboarding a New App
 
-Copy this repo as a template. The only file that ties it to the pipeline is the `Jenkinsfile` — it references the shared library in ai-devops. Update the service name and you're done.
+Copy this repo as a template. Update `SERVICE`, `OCIR_REPO` in the Jenkinsfile and you're done.
 
 ## License
 
