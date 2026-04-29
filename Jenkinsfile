@@ -9,6 +9,10 @@
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'main', description: 'Branch to build')
+    }
+
     environment {
         SERVICE       = 'auth-service'
         OCIR_REGISTRY = 'bom.ocir.io'
@@ -32,7 +36,11 @@ pipeline {
         // =====================================================================
         stage('Checkout') {
             steps {
-                checkout scm
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${params.BRANCH}"]],
+                    userRemoteConfigs: scm.userRemoteConfigs
+                ])
                 script {
                     def sha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
                     def branch = (env.GIT_BRANCH ?: 'main').replaceAll('^origin/', '').replaceAll('[^a-zA-Z0-9._-]', '_')
