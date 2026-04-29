@@ -21,6 +21,13 @@ Sample Node.js auth service — template for onboarding apps into the DIKSHA spl
 ├── .eslintrc.json
 ├── .env.example               # Local dev env vars
 ├── Jenkinsfile                # Full self-contained CI pipeline
+├── helm/auth-service/         # Simple Helm chart for K8s deployment
+│   ├── Chart.yaml
+│   ├── values.yaml
+│   └── templates/
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       └── ingress.yaml
 └── package.json
 ```
 
@@ -74,15 +81,32 @@ The pipeline uses these (all hardcoded in Jenkinsfile, no external config needed
 ## How CD Works
 
 1. Push to `main` → Jenkins CI runs → image pushed to OCIR
-2. Image tag updated in `ai-devops/kubernetes/helm-charts/auth-service/values.yaml`
+2. Image tag updated in `helm/auth-service/values.yaml` (this repo)
 3. ArgoCD detects the change and deploys to OKE
+
+### Helm Chart
+
+Simple chart at `helm/auth-service/` — Deployment, Service, optional Ingress.
+
+```bash
+# Validate locally
+helm template auth-service helm/auth-service/
+
+# Deploy
+helm upgrade --install auth-service helm/auth-service/ \
+  --set image.tag=main_abc1234_42 \
+  --namespace diksha
+
+# Override env vars
+helm upgrade --install auth-service helm/auth-service/ \
+  --set env.LOG_LEVEL=debug \
+  --set env.NODE_ENV=staging
+```
 
 ### Runtime Config
 
-- **Non-secrets** (NODE_ENV, PORT, LOG_LEVEL) → Kubernetes ConfigMap (from Helm `values.config`)
-- **Secrets** (JWT_SECRET, DB_PASSWORD, REDIS_PASSWORD) → HashiCorp Vault via CSI driver
-
-See [ai-devops SETUP.md](https://github.com/tsprasath/ai-devops/blob/main/ci/SETUP.md) for Vault + ConfigMap setup.
+- **Non-secrets** (NODE_ENV, PORT, LOG_LEVEL) → set via `env:` in values.yaml
+- **Secrets** (JWT_SECRET, DB_PASSWORD, REDIS_PASSWORD) → K8s Secrets or Vault (mount as env vars in deployment)
 
 ## Onboarding a New App
 
