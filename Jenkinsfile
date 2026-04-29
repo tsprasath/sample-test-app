@@ -1,7 +1,7 @@
 // =============================================================================
 // Jenkinsfile — CI Pipeline for auth-service (sample-test-app)
 // =============================================================================
-// Runs: lint, test, docker build, security scans, smoke test, push to OCIR.
+// Runs: lint, test, docker build, security scans, helm validate, smoke test, push to OCIR.
 // Helm chart lives in the devops repo (ai-devops); this pipeline validates CI.
 // Secrets come from Jenkins credentials (JCasC) — NOT hardcoded.
 // =============================================================================
@@ -164,7 +164,28 @@ pipeline {
         }
 
         // =====================================================================
-        // 7. SMOKE TEST (docker run + curl)
+        // 7. HELM CHART VALIDATION
+        // =====================================================================
+        stage('Helm Validate') {
+            steps {
+                sh '''#!/bin/bash
+                    if ! command -v helm &>/dev/null; then
+                        echo "SKIP: Helm not installed"
+                        exit 0
+                    fi
+                    echo "--- Helm lint ---"
+                    helm lint helm/auth-service/
+
+                    echo ""
+                    echo "--- Helm template (dry-run) ---"
+                    helm template auth-service helm/auth-service/ \
+                        --set image.tag=$IMAGE_TAG | head -60
+                '''
+            }
+        }
+
+        // =====================================================================
+        // 8. SMOKE TEST (docker run + curl)
         // =====================================================================
         stage('Smoke Test') {
             steps {
@@ -213,7 +234,7 @@ pipeline {
         }
 
         // =====================================================================
-        // 8. PUSH TO OCIR (only on main branch)
+        // 9. PUSH TO OCIR (only on main branch)
         // =====================================================================
         stage('Push to OCIR') {
             when {
